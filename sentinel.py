@@ -40,7 +40,23 @@ def run_flask():
 stats = load_stats(config.INITIAL_DEPOSIT)
 grid = []
 price_history = []
-base_price = None  # ← базовая цена сетки
+base_price = None
+
+# ─── Эмодзи уровней ───
+LEVEL_EMOJI = {
+    1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
+    6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"
+}
+
+def format_grid_levels(grid_list):
+    lines = []
+    for o in grid_list:
+        emoji = LEVEL_EMOJI.get(o["level"], "🔹")
+        if o["status"] == "bought":
+            lines.append(f"{emoji} BUY: <code>{o['actual_buy_price']}</code> ✅ → Цель: <code>{o['sell_target']}</code>")
+        else:
+            lines.append(f"{emoji} BUY: <code>{o['buy_price']}</code> ⏳")
+    return "\n".join(lines)
 
 
 # ─── Декоратор доступа ───
@@ -74,7 +90,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Пара: {config.SYMBOL}\n"
         f"📶 Сетка: {active} активных / {waiting} ожидают\n"
         f"📍 Базовая цена: <code>{round(base_price, 2) if base_price else 'N/A'}</code>\n"
-        f"{'⏸ БОТ НА ПАУЗЕ' if stats.get('is_paused') else '▶️ Торговля активна'}"
+        f"{'⏸ БОТ НА ПАУЗЕ' if stats.get('is_paused') else '▶️ Торговля активна'}\n\n"
+        f"🎯 <b>Уровни:</b>\n{format_grid_levels(grid) if grid else 'Сетка не построена'}"
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
@@ -169,7 +186,7 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🤖 <b>Команды Bybit Sentinel</b>\n\n"
-        "/start — статус бота и аптайм\n"
+        "/start — статус бота и уровни сетки\n"
         "/trades — активные ордера и сетка\n"
         "/stats — статистика и история сделок\n"
         "/pause — приостановить торговлю\n"
@@ -234,10 +251,10 @@ async def monitor_market(bot):
         text=(
             f"🚀 <b>Sentinel запущен!</b>\n"
             f"💰 Депозит: <code>{config.INITIAL_DEPOSIT}$</code>\n"
-            f"📶 Уровней: {config.GRID_LEVELS}\n"
-            f"📊 Шаг: {config.GRID_STEP * 100}%\n"
+            f"📶 Уровней: {config.GRID_LEVELS} | Шаг: {config.GRID_STEP * 100}%\n"
             f"💲 Цена: <code>{round(current_price, 2)}</code>\n"
-            f"🎯 Первый BUY: <code>{grid[0]['buy_price']}</code>"
+            f"📍 База: <code>{round(base_price, 2)}</code>\n\n"
+            f"🎯 <b>Сетка:</b>\n{format_grid_levels(grid)}"
         ),
         parse_mode='HTML'
     )
@@ -279,15 +296,14 @@ async def monitor_market(bot):
 
                     if any_updated:
                         logger.info(
-                            f"Сетка обновлена ВВЕРХ: {round(old_base, 2)} → {round(base_price, 2)}. "
-                            f"Waiting-уровни: {[o['buy_price'] for o in grid if o['status'] == 'waiting']}"
+                            f"Сетка обновлена ВВЕРХ: {round(old_base, 2)} → {round(base_price, 2)}"
                         )
                         await bot.send_message(
                             chat_id=chat_id,
                             text=(
                                 f"📊 <b>Сетка подтянута вверх</b>\n"
-                                f"📍 База: <code>{round(old_base, 2)}</code> → <code>{round(base_price, 2)}</code>\n"
-                                f"🎯 Первый BUY: <code>{grid[0]['buy_price'] if grid[0]['status'] == 'waiting' else 'активен'}</code>"
+                                f"📍 База: <code>{round(old_base, 2)}</code> → <code>{round(base_price, 2)}</code>\n\n"
+                                f"🎯 <b>Уровни:</b>\n{format_grid_levels(grid)}"
                             ),
                             parse_mode='HTML'
                         )
@@ -331,7 +347,8 @@ async def monitor_market(bot):
                             f"📉 <b>BUY</b> ур.{order['level']}\n"
                             f"💲 Цена: <code>{current_price}</code>\n"
                             f"🎯 Цель: <code>{order['sell_target']}</code>\n"
-                            f"💰 Остаток: <code>{round(stats['balance_usd'], 2)}$</code>"
+                            f"💰 Остаток: <code>{round(stats['balance_usd'], 2)}$</code>\n\n"
+                            f"🎯 <b>Сетка:</b>\n{format_grid_levels(grid)}"
                         ),
                         parse_mode='HTML'
                     )
@@ -387,18 +404,6 @@ async def monitor_market(bot):
                     if len(stats["closed_trades"]) > 50:
                         stats["closed_trades"] = stats["closed_trades"][-50:]
 
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            f"✅ <b>SELL</b> ур.{order['level']}\n"
-                            f"💲 Цена: <code>{sell_price}</code>\n"
-                            f"📍 Вход: <code>{order['actual_buy_price']}</code>\n"
-                            f"➕ Профит: <code>+{round(profit, 4)}$</code>\n"
-                            f"💰 Баланс: <code>{round(stats['balance_usd'], 2)}$</code>"
-                        ),
-                        parse_mode='HTML'
-                    )
-
                     # ── После продажи обновляем базу если цена выросла ──
                     if sell_price > base_price:
                         base_price = sell_price
@@ -416,6 +421,19 @@ async def monitor_market(bot):
                     order["actual_buy_price"] = 0.0
                     order["price_high"] = 0.0
                     order["trailing_stop"] = 0.0
+
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"✅ <b>SELL</b> ур.{order['level']}\n"
+                            f"💲 Цена: <code>{sell_price}</code>\n"
+                            f"📍 Вход: <code>{order['actual_buy_price']}</code>\n"
+                            f"➕ Профит: <code>+{round(profit, 4)}$</code>\n"
+                            f"💰 Баланс: <code>{round(stats['balance_usd'], 2)}$</code>\n\n"
+                            f"🎯 <b>Сетка:</b>\n{format_grid_levels(grid)}"
+                        ),
+                        parse_mode='HTML'
+                    )
 
                     save_stats(stats)
                     logger.info(
