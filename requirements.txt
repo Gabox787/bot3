@@ -1,0 +1,6 @@
+pybit
+python-telegram-bot
+flask
+requests
+pycryptodome
+httpx
