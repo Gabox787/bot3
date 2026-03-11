@@ -40,6 +40,7 @@ def run_flask():
 stats = load_stats(config.INITIAL_DEPOSIT)
 grid = []
 price_history = []
+base_price = None  # ← базовая цена сетки
 
 
 # ─── Декоратор доступа ───
@@ -72,6 +73,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 Депозит: <code>{round(stats['balance_usd'], 2)}$</code>\n"
         f"📊 Пара: {config.SYMBOL}\n"
         f"📶 Сетка: {active} активных / {waiting} ожидают\n"
+        f"📍 Базовая цена: <code>{round(base_price, 2) if base_price else 'N/A'}</code>\n"
         f"{'⏸ БОТ НА ПАУЗЕ' if stats.get('is_paused') else '▶️ Торговля активна'}"
     )
     await update.message.reply_text(msg, parse_mode='HTML')
@@ -81,7 +83,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def trades_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price = round(stats['current_price'], 2)
     header = f"🪙 <b>{config.SYMBOL}:</b> <code>{price}</code> USDT\n"
-    header += f"💰 Депозит: <code>{round(stats['balance_usd'], 2)}$</code>\n\n"
+    header += f"💰 Депозит: <code>{round(stats['balance_usd'], 2)}$</code>\n"
+    header += f"📍 База сетки: <code>{round(base_price, 2) if base_price else 'N/A'}</code>\n\n"
 
     if not grid:
         await update.message.reply_text(
@@ -207,7 +210,7 @@ async def check_volatility(bot, current_price: float):
 
 
 async def monitor_market(bot):
-    global grid
+    global grid, base_price
 
     chat_id = os.getenv("CHAT_ID", config.CHAT_ID)
     session = HTTP(testnet=config.IS_TESTNET)
@@ -217,6 +220,8 @@ async def monitor_market(bot):
     current_price = float(res['result']['list'][0]['lastPrice'])
     stats["current_price"] = current_price
 
+    # ── Инициализация базовой цены и сетки ──
+    base_price = current_price
     grid = build_grid(current_price)
     stats["last_grid_update"] = time.time()
     logger.info(
@@ -249,29 +254,49 @@ async def monitor_market(bot):
                 await asyncio.sleep(config.POLL_INTERVAL)
                 continue
 
-            # ── Обновление сетки по таймеру ──
+            # ══════════════════════════════════════
+            #   ОБНОВЛЕНИЕ СЕТКИ — ТОЛЬКО ВВЕРХ
+            # ══════════════════════════════════════
             if time.time() - stats["last_grid_update"] > config.GRID_REFRESH_SECONDS:
-                any_updated = False
-                for order in grid:
-                    if order["status"] == "waiting":
-                        new_buy = round(
-                            current_price * (1 - config.GRID_STEP * order["level"]),
-                            2
-                        )
-                        if new_buy != order["buy_price"]:
-                            order["buy_price"] = new_buy
-                            order["sell_target"] = round(
-                                new_buy * (1 + config.GRID_STEP + config.PROFIT_MARGIN),
+                if current_price > base_price:
+                    old_base = base_price
+                    base_price = current_price
+                    any_updated = False
+
+                    for order in grid:
+                        if order["status"] == "waiting":
+                            new_buy = round(
+                                base_price * (1 - config.GRID_STEP * order["level"]),
                                 2
                             )
-                            any_updated = True
+                            if new_buy != order["buy_price"]:
+                                order["buy_price"] = new_buy
+                                order["sell_target"] = round(
+                                    new_buy * (1 + config.GRID_STEP + config.PROFIT_MARGIN),
+                                    2
+                                )
+                                any_updated = True
+
+                    if any_updated:
+                        logger.info(
+                            f"Сетка обновлена ВВЕРХ: {round(old_base, 2)} → {round(base_price, 2)}. "
+                            f"Waiting-уровни: {[o['buy_price'] for o in grid if o['status'] == 'waiting']}"
+                        )
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"📊 <b>Сетка подтянута вверх</b>\n"
+                                f"📍 База: <code>{round(old_base, 2)}</code> → <code>{round(base_price, 2)}</code>\n"
+                                f"🎯 Первый BUY: <code>{grid[0]['buy_price'] if grid[0]['status'] == 'waiting' else 'активен'}</code>"
+                            ),
+                            parse_mode='HTML'
+                        )
+                else:
+                    logger.info(
+                        f"Сетка НЕ обновлена: цена {round(current_price, 2)} <= база {round(base_price, 2)}"
+                    )
 
                 stats["last_grid_update"] = time.time()
-                if any_updated:
-                    logger.info(
-                        f"Сетка обновлена. Waiting-уровни: "
-                        f"{[o['buy_price'] for o in grid if o['status'] == 'waiting']}"
-                    )
 
             # ── Логика BUY ──
             for order in grid:
@@ -374,9 +399,13 @@ async def monitor_market(bot):
                         parse_mode='HTML'
                     )
 
+                    # ── После продажи обновляем базу если цена выросла ──
+                    if sell_price > base_price:
+                        base_price = sell_price
+
                     order["status"] = "waiting"
                     order["buy_price"] = round(
-                        sell_price * (1 - config.GRID_STEP * order["level"]),
+                        base_price * (1 - config.GRID_STEP * order["level"]),
                         2
                     )
                     order["sell_target"] = round(
